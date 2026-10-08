@@ -113,6 +113,68 @@
             color: #94a3b8;
         }
 
+        /* 時間校正狀態（日期下方） */
+        .middle-section {
+            flex-direction: column;
+            justify-content: center;
+        }
+
+        #sync-status {
+            display: flex;
+            align-items: center;
+            gap: 0.4rem;
+            margin-top: 0.15rem;
+            padding: 0.1rem 0.5rem;
+            border: none;
+            border-radius: 999px;
+            background: transparent;
+            color: #94a3b8;
+            font: inherit;
+            font-size: 0.8rem;
+            font-weight: 500;
+            line-height: 1.4;
+            white-space: nowrap;
+            cursor: pointer;
+            transition: background-color .2s;
+        }
+
+        #sync-status:hover {
+            background-color: #f1f5f9;
+        }
+
+        .dark #sync-status {
+            color: #64748b;
+        }
+
+        .dark #sync-status:hover {
+            background-color: #334155;
+        }
+
+        #sync-status .sync-dot {
+            width: 0.5rem;
+            height: 0.5rem;
+            border-radius: 50%;
+            background-color: #94a3b8;
+            flex-shrink: 0;
+        }
+
+        #sync-status[data-state="ok"] .sync-dot {
+            background-color: #10b981;
+        }
+
+        #sync-status[data-state="failed"] .sync-dot {
+            background-color: #f59e0b;
+        }
+
+        #sync-status[data-state="syncing"] .sync-dot {
+            background-color: #3b82f6;
+            animation: sync-pulse 1s ease-in-out infinite;
+        }
+
+        @keyframes sync-pulse {
+            50% { opacity: 0.3; }
+        }
+
         /* 資訊項目 */
         .info-item {
             display: flex;
@@ -441,6 +503,7 @@
         <!-- 中間：日期 -->
         <div class="middle-section">
             <div id="d"></div>
+            <button id="sync-status" type="button" data-state="syncing" title="點擊立即重新校正"><span class="sync-dot"></span><span class="sync-text">校正中…</span></button>
         </div>
 
         <!-- 右側：資訊卡片 -->
@@ -662,7 +725,13 @@
                     return best;
                 }
 
-                async function syncTime() {
+                let syncState = 'syncing'; // syncing | ok | failed
+                let syncPromise = null;
+                let lastSyncAttempt = 0;
+
+                async function runSync() {
+                    syncState = 'syncing';
+                    lastSyncAttempt = Date.now();
                     for (const source of TIME_SOURCES) {
                         if (!source.url) continue;
                         try {
@@ -670,34 +739,62 @@
                             if (!best) continue;
                             timeOffset = best.offset;
                             syncInfo = { source: source.name, offset: best.offset, error: best.rtt / 2 + source.precision, at: Date.now() };
+                            syncState = 'ok';
                             console.log(`✅ 時間校正 (${source.name})：偏移 ${best.offset.toFixed(0)}ms，誤差 ±${syncInfo.error.toFixed(0)}ms`);
                             return true;
                         } catch (e) {
                             console.warn(`❌ ${source.name} 校正失敗：`, e.message || e);
                         }
                     }
-                    console.warn('⚠️ 所有時間來源都無法連線，使用本地時間');
-                    if (!syncInfo) syncInfo = { failed: true };
+                    console.warn('⚠️ 所有時間來源都無法連線，沿用上次校正結果或本地時間');
+                    syncState = 'failed';
                     return false;
+                }
+
+                // 同一時間只跑一次校正
+                function syncTime() {
+                    if (!syncPromise) syncPromise = runSync().finally(() => { syncPromise = null; });
+                    return syncPromise;
                 }
 
                 function nowCorrected() {
                     return new Date(Date.now() + timeOffset);
                 }
 
-                function syncIndicator() {
-                    if (!syncInfo) return '';
-                    if (syncInfo.failed) {
-                        return ` <span class="sync-indicator" style="color:#f59e0b;font-size:.75em" title="無法連接時間伺服器，顯示本地時間">⚠</span>`;
+                function formatAgo(ms) {
+                    const min = Math.floor(ms / 60000);
+                    if (min < 1) return '剛剛';
+                    if (min < 60) return `${min} 分鐘前`;
+                    return `${Math.floor(min / 60)} 小時前`;
+                }
+
+                function formatClock(ts) {
+                    const t = new Date(ts + timeOffset);
+                    return [t.getHours(), t.getMinutes(), t.getSeconds()].map(n => ('0' + n).slice(-2)).join(':');
+                }
+
+                function syncStatus() {
+                    const next = `下次校正：${formatClock(lastSyncAttempt + RESYNC_INTERVAL)}`;
+                    const detail = syncInfo
+                        ? `時間來源：${syncInfo.source}\n本機時鐘偏差：${syncInfo.offset >= 0 ? '+' : ''}${(syncInfo.offset / 1000).toFixed(3)} 秒\n誤差：±${Math.round(syncInfo.error)} ms\n上次校正：${formatClock(syncInfo.at)}`
+                        : '';
+                    if (syncState === 'syncing') {
+                        return { text: '校正中…', title: '正在與網路時間伺服器校正' };
                     }
-                    const diff = (syncInfo.offset / 1000).toFixed(3);
-                    const err = Math.round(syncInfo.error);
-                    return ` <span class="sync-indicator" style="color:#10b981;font-size:.75em" title="已與 ${syncInfo.source} 校正&#10;本機時鐘偏差 ${diff > 0 ? '+' : ''}${diff}s（誤差 ±${err}ms）">✓</span>`;
+                    if (syncState === 'ok') {
+                        return { text: `已校正 · ${formatAgo(Date.now() - syncInfo.at)}`, title: `${detail}\n${next}\n\n點擊立即重新校正` };
+                    }
+                    return {
+                        text: syncInfo ? `校正失敗 · 上次 ${formatAgo(Date.now() - syncInfo.at)}` : '未校正 · 使用本機時間',
+                        title: `無法連接時間伺服器${detail ? '\n\n' + detail : ''}\n${next}\n\n點擊立即重試`
+                    };
                 }
 
                 function initializeTime() {
                     const timeContainer = d.getElementById('time-container');
                     const dateEl = d.getElementById('d');
+                    const statusEl = d.getElementById('sync-status');
+                    const statusText = statusEl.querySelector('.sync-text');
                     const hEl = createFlipTile('h');
                     const mEl = createFlipTile('m');
                     const sEl = createFlipTile('s');
@@ -714,18 +811,19 @@
                     timeContainer.appendChild(createColon());
                     timeContainer.appendChild(sEl);
 
-                    let lastDateHtml = '';
                     function render() {
                         const now = nowCorrected();
                         updateFlipTile(hEl, pad(now.getHours()));
                         updateFlipTile(mEl, pad(now.getMinutes()));
                         updateFlipTile(sEl, pad(now.getSeconds()));
 
-                        const html = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${T.weekdays[now.getDay()]}${syncIndicator()}`;
-                        if (html !== lastDateHtml) {
-                            dateEl.innerHTML = html;
-                            lastDateHtml = html;
-                        }
+                        const dateText = `${now.getFullYear()}-${pad(now.getMonth() + 1)}-${pad(now.getDate())} ${T.weekdays[now.getDay()]}`;
+                        if (dateEl.textContent !== dateText) dateEl.textContent = dateText;
+
+                        const status = syncStatus();
+                        if (statusEl.dataset.state !== syncState) statusEl.dataset.state = syncState;
+                        if (statusText.textContent !== status.text) statusText.textContent = status.text;
+                        if (statusEl.title !== status.title) statusEl.title = status.title;
                     }
 
                     // 對齊到「校正後時間」的整秒邊界，避免 setInterval 漂移造成跳秒
@@ -734,15 +832,21 @@
                         const ms = (Date.now() + timeOffset) % 1000;
                         setTimeout(tick, 1000 - ms + 5);
                     }
+
+                    function resync() {
+                        const p = syncTime();
+                        render();
+                        p.then(render);
+                    }
+
                     tick();
 
-                    // 背景校正，不阻塞畫面；之後定期與分頁回到前景時重新校正
-                    syncTime().then(render);
-                    setInterval(() => syncTime().then(render), RESYNC_INTERVAL);
+                    // 背景校正，不阻塞畫面；之後定期、分頁回到前景、或點擊狀態列時重新校正
+                    resync();
+                    setInterval(resync, RESYNC_INTERVAL);
+                    statusEl.addEventListener('click', resync);
                     d.addEventListener('visibilitychange', () => {
-                        if (d.visibilityState === 'visible' && syncInfo && Date.now() - (syncInfo.at || 0) > 5 * 60 * 1000) {
-                            syncTime().then(render);
-                        }
+                        if (d.visibilityState === 'visible' && Date.now() - lastSyncAttempt > 5 * 60 * 1000) resync();
                     });
                 }
 
